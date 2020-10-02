@@ -133,12 +133,19 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
     with torch.no_grad():
         val_sampler = DistributedSampler(valset) if distributed_run else None
         val_loader = DataLoader(valset, sampler=val_sampler, num_workers=1,
-                                shuffle=False, batch_size=batch_size,
-                                pin_memory=False, collate_fn=collate_fn)
+                                shuffle=True, batch_size=batch_size,
+                                pin_memory=False, collate_fn=collate_fn)  # shuffle=False,
 
         val_loss = 0.0
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)  # y: 2部分
+            # x: (text_padded, input_lengths, mel_padded, max_len, output_lengths, speaker_ids, f0_padded),
+            # y: (mel_padded, gate_padded)
+            # x:
+            # torch.Size([4, 64])
+            # torch.Size([4])
+            # torch.Size([4, 401, 347])
+
             # y:
             # torch.Size([4, 401, 439])
             # torch.Size([4, 439])
@@ -174,7 +181,7 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
     model.train()
     if rank == 0:
         print("Validation loss {}: {:9f}  ".format(iteration, reduced_val_loss))
-        logger.log_validation(val_loss, model, y, y_pred, iteration)
+        logger.log_validation(val_loss, model, y, y_pred, iteration, x)
 
 
 def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
@@ -310,8 +317,14 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
 
 
 if __name__ == '__main__':
+    try:
+        from setproctitle import setproctitle
+        setproctitle('zhrtvc-mellotron-train')
+    except ImportError:
+        pass
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('-o', '--output_directory', type=str, default=r'F:\github\zhrtvc\models\mellotron\linear',
+    parser.add_argument('-o', '--output_directory', type=str, default=r"../../models/mellotron/samples_ssml",
                         help='directory to save checkpoints')
     parser.add_argument('-l', '--log_directory', type=str, default='tensorboard',
                         help='directory to save tensorboard logs')
@@ -325,7 +338,7 @@ if __name__ == '__main__':
                         required=False, help='rank of current gpu')
     parser.add_argument('--group_name', type=str, default='group_name',
                         required=False, help='Distributed group name')
-    parser.add_argument('--hparams', type=str, default='{"batch_size":4,"iters_per_checkpoint":2}',
+    parser.add_argument('--hparams', type=str, default='{"batch_size":64,"iters_per_checkpoint":5000}',
                         required=False, help='comma separated name=value pairs')
 
     args = parser.parse_args()

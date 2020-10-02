@@ -5,6 +5,12 @@
 """
 """
 from pathlib import Path
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(Path(__name__).stem)
+
+from pathlib import Path
 from functools import partial
 from multiprocessing.pool import Pool
 from matplotlib import pyplot as plt
@@ -30,7 +36,7 @@ def format_index(index):
     return '{:06d}'.format(index)
 
 
-def process_one(index):
+def process_one(index, skip_existing=False):
     global text_mel_loader
     global metadata_path
     global output_dir
@@ -40,13 +46,18 @@ def process_one(index):
         speaker_ids = text_mel_loader.speaker_ids
         json.dump(speaker_ids, open(fpath, 'wt', encoding='utf8'), indent=4, ensure_ascii=False)
 
-    text, mel, speaker_id, f0 = text_mel_loader[index]
     onedir = output_dir.joinpath('npy', format_index(index))
-    onedir.mkdir(exist_ok=True)
+    onedir.mkdir(exist_ok=True, parents=True)
     tpath = onedir.joinpath("text.npy")
     mpath = onedir.joinpath("mel.npy")
     spath = onedir.joinpath("speaker.npy")
     fpath = onedir.joinpath("f0.npy")
+
+    if skip_existing and all([f.is_file() for f in [tpath, mpath, spath, fpath]]):
+        return
+
+    text, mel, speaker_id, f0 = text_mel_loader[index]
+
     np.save(tpath, text.numpy(), allow_pickle=False)
     np.save(mpath, mel.numpy(), allow_pickle=False)
     np.save(spath, speaker_id.numpy(), allow_pickle=False)
@@ -54,7 +65,7 @@ def process_one(index):
     return index
 
 
-def process_many(n_processes):
+def process_many(n_processes, skip_existing=False):
     # Embed the utterances in separate threads
     ids = list(range(len(text_mel_loader)))
     with open(output_dir.joinpath('train.txt'), 'wt', encoding='utf8') as fout:
@@ -63,37 +74,49 @@ def process_many(n_processes):
             fout.write('{}\t{}\n'.format(format_index(idx), '\t'.join(tmp).strip()))
 
     with open(output_dir.joinpath('validation.txt'), 'wt', encoding='utf8') as fout:
-        for idx in tqdm(np.random.choice(ids, hp.batch_size * 2, replace=False)):
+        val_ids = np.random.choice(ids, min(len(ids), hp.batch_size * 2), replace=False)
+        for idx in tqdm(val_ids):
             tmp = text_mel_loader.audiopaths_and_text[idx]
             fout.write('{}\t{}\n'.format(format_index(idx), '\t'.join(tmp).strip()))
 
     if n_processes == 0:
-        for num in tqdm(ids):
-            process_one(num)
+        for index in tqdm(ids):
+            try:  # 防止少数错误语音导致生成数据失败。
+                process_one(index, skip_existing=skip_existing)
+            except Exception as e:
+                logger.info('Error! The <{}> audio load failed! {}'.format(index, e))
+                tmp = text_mel_loader.audiopaths_and_text[index]
+                logger.info('{}\t{}\n'.format(format_index(index), '\t'.join(tmp).strip()))
+                logger.info('=' * 50)
     else:
-        func = partial(process_one)
+        func = partial(process_one, skip_existing=skip_existing)
         job = Pool(n_processes).imap(func, ids)
         list(tqdm(job, "Embedding", len(ids), unit="utterances"))
 
 
 if __name__ == "__main__":
-    print(__file__)
     import argparse
+    try:
+        from setproctitle import setproctitle
+        setproctitle('zhrtvc-mellotron-preprocess')
+    except ImportError:
+        pass
+
 
     parser = argparse.ArgumentParser(
         description="预处理训练数据，保存为numpy的npy格式，训练的时候直接从本地load数据。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("-i", "--metadata_path", type=str, default=r'F:\github\zhrtvc\data\samples\metadata.csv',
+    parser.add_argument("-i", "--metadata_path", type=str, default=r'../../data/samples_ssml/metadata.csv',
                         help="metadata file path")
     # 每行数据格式：语音文件路径\t文本\t说话人名称\n，样例：aliaudio/Aibao/005397.mp3	他走近钢琴并开始演奏“祖国从哪里开始”。	aibao
 
     parser.add_argument("-o", "--output_dir", type=Path,
-                        default=Path(r'F:\github\zhrtvc\data\SV2TTS\mellotron\linear'),
+                        default=Path(r'../../data/SV2TTS/mellotron/samples_ssml'),
                         help="Path to the output directory")
     parser.add_argument("-n", "--n_processes", type=int, default=0,
                         help="Number of processes in parallel.")
-    parser.add_argument("-s", "--skip_existing", type=bool, default=False,
+    parser.add_argument("-s", "--skip_existing", type=bool, default=True,
                         help="Whether to overwrite existing files with the same name. ")
     parser.add_argument("--hparams", type=str, default="",
                         help="Hyperparameter overrides as a comma-separated list of name-value pairs")
@@ -110,4 +133,4 @@ if __name__ == "__main__":
     json.dump(speaker_ids, open(fpath, 'wt', encoding='utf8'), indent=4, ensure_ascii=False)
 
     # Preprocess the dataset
-    process_many(args.n_processes)
+    process_many(args.n_processes, skip_existing=args.skip_existing)
